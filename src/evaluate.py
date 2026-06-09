@@ -31,13 +31,14 @@ from config import (
     CONFUSION_MATRIX_PNG, LOSS_CURVE_PNG, CATEGORY_F1_PNG,
     DATA_SCALE_PNG, METRICS_JSON, REPORT_MD,
     BILSTM_MAX_LEN, BILSTM_EMBEDDING_DIM, BILSTM_HIDDEN_DIM,
-    BILSTM_NUM_LAYERS, BILSTM_DROPOUT, BILSTM_VOCAB_SIZE,
+    BILSTM_NUM_LAYERS, BILSTM_DROPOUT, BILSTM_DROPOUT_EMBED,
+    BILSTM_VOCAB_SIZE, BILSTM_POOLING,
     DEVICE, RANDOM_SEED, ensure_dirs,
 )
 from utils import seed_everything, save_json, Timer
 
 # ── 全局字体 ──
-plt.rcParams["font.sans-serif"] = ["SimHei", "DejaVu Sans"]
+plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -77,6 +78,8 @@ def load_bilstm(vocab_size: int, num_classes: int) -> nn.Module:
         num_layers=BILSTM_NUM_LAYERS,
         num_classes=num_classes,
         dropout=BILSTM_DROPOUT,
+        pooling=BILSTM_POOLING,
+        embed_dropout=BILSTM_DROPOUT_EMBED,
     ).to(DEVICE)
     model.load_state_dict(torch.load(str(BILSTM_MODEL_PATH), map_location=DEVICE))
     model.eval()
@@ -87,8 +90,11 @@ class BiLSTMClassifier(nn.Module):
     """与 bilstm.py 定义完全一致的模型结构"""
 
     def __init__(self, vocab_size, embedding_dim, hidden_dim, num_layers,
-                 num_classes, dropout, pad_idx=0):
+                 num_classes, dropout, pooling="mean_max",
+                 embed_dropout=0.2, pad_idx=0):
         super().__init__()
+        self.pooling = pooling
+        self.embed_dropout = nn.Dropout(embed_dropout)
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
         self.lstm = nn.LSTM(
             embedding_dim, hidden_dim, num_layers,
@@ -96,12 +102,39 @@ class BiLSTMClassifier(nn.Module):
             dropout=dropout if num_layers > 1 else 0,
         )
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim * 2, num_classes)
+
+        if pooling == "mean_max":
+            fc_input_dim = hidden_dim * 4
+        elif pooling == "attention":
+            self.attention = nn.Linear(hidden_dim * 2, 1, bias=False)
+            fc_input_dim = hidden_dim * 2
+        else:
+            fc_input_dim = hidden_dim * 2
+
+        self.layer_norm = nn.LayerNorm(fc_input_dim)
+        self.fc = nn.Linear(fc_input_dim, num_classes)
 
     def forward(self, x):
         emb = self.embedding(x)
+        emb = self.embed_dropout(emb)
         lstm_out, _ = self.lstm(emb)
-        pooled = F.max_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+
+        if self.pooling == "max":
+            pooled = F.max_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+        elif self.pooling == "mean":
+            pooled = F.avg_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+        elif self.pooling == "mean_max":
+            max_pooled = F.max_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+            avg_pooled = F.avg_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+            pooled = torch.cat([max_pooled, avg_pooled], dim=1)
+        elif self.pooling == "attention":
+            attn_weights = self.attention(lstm_out).squeeze(-1)
+            attn_weights = F.softmax(attn_weights, dim=1)
+            pooled = torch.bmm(attn_weights.unsqueeze(1), lstm_out).squeeze(1)
+        else:
+            pooled = F.max_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+
+        pooled = self.layer_norm(pooled)
         out = self.dropout(pooled)
         logits = self.fc(out)
         return logits

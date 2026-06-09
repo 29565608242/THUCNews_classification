@@ -15,9 +15,10 @@ from tqdm import tqdm
 from config import (
     TRAIN_CSV, VALID_CSV, TEST_CSV, BILSTM_MODEL_PATH,
     BILSTM_MAX_LEN, BILSTM_EMBEDDING_DIM, BILSTM_HIDDEN_DIM,
-    BILSTM_NUM_LAYERS, BILSTM_DROPOUT, BILSTM_BATCH_SIZE,
-    BILSTM_EPOCHS, BILSTM_LR, BILSTM_VOCAB_SIZE, RANDOM_SEED,
-    EARLY_STOP_PATIENCE, DEVICE, ensure_dirs,
+    BILSTM_NUM_LAYERS, BILSTM_DROPOUT, BILSTM_DROPOUT_EMBED,
+    BILSTM_BATCH_SIZE, BILSTM_EPOCHS, BILSTM_LR, BILSTM_LR_MIN,
+    BILSTM_WEIGHT_DECAY, BILSTM_USE_SCHEDULER, BILSTM_VOCAB_SIZE,
+    BILSTM_POOLING, RANDOM_SEED, EARLY_STOP_PATIENCE, DEVICE, ensure_dirs,
 )
 from utils import seed_everything, Timer, save_json
 
@@ -61,25 +62,57 @@ def build_vocab(texts, vocab_size):
 # ── 模型 ──
 
 class BiLSTMClassifier(nn.Module):
-    """BiLSTM 文本分类模型"""
+    """BiLSTM 文本分类模型（支持多种 pooling 策略）"""
 
     def __init__(self, vocab_size, embedding_dim, hidden_dim, num_layers,
-                 num_classes, dropout, pad_idx=0):
+                 num_classes, dropout, pooling="mean_max",
+                 embed_dropout=0.2, pad_idx=0):
         super().__init__()
+        self.pooling = pooling
+        self.embed_dropout = nn.Dropout(embed_dropout)
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
         self.lstm = nn.LSTM(
             embedding_dim, hidden_dim, num_layers,
-            batch_first=True, bidirectional=True, dropout=dropout if num_layers > 1 else 0,
+            batch_first=True, bidirectional=True,
+            dropout=dropout if num_layers > 1 else 0,
         )
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim * 2, num_classes)  # *2 因为双向
+
+        # pooling 方式决定分类器输入维度
+        if pooling == "mean_max":
+            fc_input_dim = hidden_dim * 4  # 双向 * (mean + max)
+        elif pooling == "attention":
+            self.attention = nn.Linear(hidden_dim * 2, 1, bias=False)
+            fc_input_dim = hidden_dim * 2
+        else:  # max 或 mean
+            fc_input_dim = hidden_dim * 2
+
+        self.layer_norm = nn.LayerNorm(fc_input_dim)
+        self.fc = nn.Linear(fc_input_dim, num_classes)
 
     def forward(self, x):
         # x: (batch, seq_len)
-        emb = self.embedding(x)  # (batch, seq_len, emb_dim)
-        lstm_out, _ = self.lstm(emb)  # (batch, seq_len, hidden*2)
-        # 全局最大池化
-        pooled = F.max_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+        emb = self.embedding(x)            # (batch, seq_len, emb_dim)
+        emb = self.embed_dropout(emb)
+        lstm_out, _ = self.lstm(emb)       # (batch, seq_len, hidden*2)
+
+        if self.pooling == "max":
+            pooled = F.max_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+        elif self.pooling == "mean":
+            pooled = F.avg_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+        elif self.pooling == "mean_max":
+            max_pooled = F.max_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+            avg_pooled = F.avg_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+            pooled = torch.cat([max_pooled, avg_pooled], dim=1)
+        elif self.pooling == "attention":
+            # 自注意力和池化结合
+            attn_weights = self.attention(lstm_out).squeeze(-1)  # (batch, seq_len)
+            attn_weights = F.softmax(attn_weights, dim=1)
+            pooled = torch.bmm(attn_weights.unsqueeze(1), lstm_out).squeeze(1)  # (batch, hidden*2)
+        else:
+            pooled = F.max_pool1d(lstm_out.transpose(1, 2), lstm_out.size(1)).squeeze(-1)
+
+        pooled = self.layer_norm(pooled)
         out = self.dropout(pooled)
         logits = self.fc(out)
         return logits
@@ -87,7 +120,7 @@ class BiLSTMClassifier(nn.Module):
 
 # ── 训练 ──
 
-def train_epoch(model, loader, optimizer, criterion):
+def train_epoch(model, loader, optimizer, criterion, max_grad_norm=5.0):
     model.train()
     total_loss, total_correct, total = 0, 0, 0
     for inputs, labels in loader:
@@ -96,6 +129,7 @@ def train_epoch(model, loader, optimizer, criterion):
         outputs = model(inputs)
         loss = criterion(outputs, labels)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
         total_loss += loss.item() * inputs.size(0)
         _, preds = torch.max(outputs, 1)
@@ -122,15 +156,41 @@ def evaluate(model, loader, criterion):
     return total_loss / total, total_correct / total, np.array(all_preds), np.array(all_labels)
 
 
-def train(data_scale=None):
-    """训练 BiLSTM 模型"""
+def train(data_scale=None, params_override=None):
+    """训练 BiLSTM 模型
+
+    Args:
+        data_scale: 训练数据量
+        params_override: 参数字典，覆盖 config 中的默认值
+    """
     ensure_dirs()
     seed_everything(RANDOM_SEED)
+
+    # 合并覆盖参数
+    p = dict(
+        max_len=BILSTM_MAX_LEN,
+        embedding_dim=BILSTM_EMBEDDING_DIM,
+        hidden_dim=BILSTM_HIDDEN_DIM,
+        num_layers=BILSTM_NUM_LAYERS,
+        dropout=BILSTM_DROPOUT,
+        embed_dropout=BILSTM_DROPOUT_EMBED,
+        batch_size=BILSTM_BATCH_SIZE,
+        epochs=BILSTM_EPOCHS,
+        lr=BILSTM_LR,
+        weight_decay=BILSTM_WEIGHT_DECAY,
+        use_scheduler=BILSTM_USE_SCHEDULER,
+        vocab_size=BILSTM_VOCAB_SIZE,
+        pooling=BILSTM_POOLING,
+        lr_min=BILSTM_LR_MIN,
+    )
+    if params_override:
+        p.update(params_override)
 
     print("=" * 50)
     print("BiLSTM 训练")
     print("=" * 50)
     print(f"设备: {DEVICE}")
+    print(f"超参数: { {k: v for k, v in p.items() if k != 'use_scheduler'} }")
 
     # 1. 加载数据
     train_df = pd.read_csv(TRAIN_CSV)
@@ -147,15 +207,15 @@ def train(data_scale=None):
 
     # 2. 构建词表
     print("\n构建词表...")
-    vocab = build_vocab(train_df["text"].values, BILSTM_VOCAB_SIZE)
+    vocab = build_vocab(train_df["text"].values, p["vocab_size"])
     vocab_size = len(vocab)
     print(f"词表大小: {vocab_size}")
 
     # 3. 数据加载器
-    batch_size = BILSTM_BATCH_SIZE
-    train_dataset = TextDataset(train_df["text"].values, train_df["label"].values, vocab, BILSTM_MAX_LEN)
-    valid_dataset = TextDataset(valid_df["text"].values, valid_df["label"].values, vocab, BILSTM_MAX_LEN)
-    test_dataset = TextDataset(test_df["text"].values, test_df["label"].values, vocab, BILSTM_MAX_LEN)
+    batch_size = p["batch_size"]
+    train_dataset = TextDataset(train_df["text"].values, train_df["label"].values, vocab, p["max_len"])
+    valid_dataset = TextDataset(valid_df["text"].values, valid_df["label"].values, vocab, p["max_len"])
+    test_dataset = TextDataset(test_df["text"].values, test_df["label"].values, vocab, p["max_len"])
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size)
@@ -165,38 +225,58 @@ def train(data_scale=None):
     print("\n初始化 BiLSTM 模型...")
     model = BiLSTMClassifier(
         vocab_size=vocab_size,
-        embedding_dim=BILSTM_EMBEDDING_DIM,
-        hidden_dim=BILSTM_HIDDEN_DIM,
-        num_layers=BILSTM_NUM_LAYERS,
+        embedding_dim=p["embedding_dim"],
+        hidden_dim=p["hidden_dim"],
+        num_layers=p["num_layers"],
         num_classes=num_classes,
-        dropout=BILSTM_DROPOUT,
+        dropout=p["dropout"],
+        pooling=p["pooling"],
+        embed_dropout=p["embed_dropout"],
     ).to(DEVICE)
     print(f"  参数量: {sum(p.numel() for p in model.parameters()):,}")
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=BILSTM_LR)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=p["lr"], weight_decay=p["weight_decay"],
+    )
+    max_grad_norm = 5.0
+
+    # 学习率调度器
+    scheduler = None
+    if p["use_scheduler"]:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=2,
+            min_lr=p["lr_min"],
+        )
 
     # 5. 训练循环
-    print(f"\n开始训练 ({BILSTM_EPOCHS} epochs)...")
+    print(f"\n开始训练 ({p['epochs']} epochs)...")
     timer = Timer().tic()
 
     best_val_loss = float("inf")
     best_epoch = 0
     patience_counter = 0
-    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "lr": []}
 
-    for epoch in range(1, BILSTM_EPOCHS + 1):
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion)
+    for epoch in range(1, p["epochs"] + 1):
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, max_grad_norm)
         val_loss, val_acc, _, _ = evaluate(model, valid_loader, criterion)
 
+        current_lr = optimizer.param_groups[0]["lr"]
         history["train_loss"].append(round(train_loss, 4))
         history["train_acc"].append(round(train_acc, 4))
         history["val_loss"].append(round(val_loss, 4))
         history["val_acc"].append(round(val_acc, 4))
+        history["lr"].append(current_lr)
 
-        print(f"  Epoch {epoch:2d}/{BILSTM_EPOCHS} | "
+        print(f"  Epoch {epoch:2d}/{p['epochs']} | "
               f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
-              f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
+              f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} | "
+              f"LR: {current_lr:.2e}")
+
+        # 学习率调度
+        if scheduler:
+            scheduler.step(val_loss)
 
         # Early stopping
         if val_loss < best_val_loss:
