@@ -2,6 +2,7 @@
 """BERT 模型——微调训练与评估"""
 
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 # 使用 HuggingFace 国内镜像（环境无法直接访问 huggingface.co）
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
@@ -13,10 +14,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torch.optim import AdamW
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, get_linear_schedule_with_warmup
+from sklearn.utils.class_weight import compute_class_weight
 from tqdm import tqdm
 
 from config import (
-    TRAIN_CSV, VALID_CSV, TEST_CSV, BERT_MODEL_PATH,
+    TRAIN_CSV, VALID_CSV, TEST_CSV, BERT_MODEL_PATH, BERT_METRICS_PATH,
+    BERT_LOSS_CURVE,
     BERT_MODEL_NAME, BERT_MAX_LEN, BERT_BATCH_SIZE,
     BERT_EPOCHS, BERT_LR, RANDOM_SEED, EARLY_STOP_PATIENCE,
     DEVICE, ensure_dirs,
@@ -161,29 +164,40 @@ def train(data_scale=None):
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size)
     test_loader = DataLoader(test_dataset, batch_size=batch_size)
 
-    # 4. 加载预训练模型
+    # 4. 计算类别权重（解决不平衡）
+    print("\n计算类别权重...")
+    class_weights = compute_class_weight(
+        "balanced", classes=np.unique(train_df["label"].values),
+        y=train_df["label"].values,
+    )
+    weight_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
+    for i, w in enumerate(class_weights):
+        print(f"  类别 {i}: weight={w:.4f}")
+
+    # 5. 加载预训练模型
     print(f"\n加载预训练模型: {BERT_MODEL_NAME}...")
     model = AutoModelForSequenceClassification.from_pretrained(
         BERT_MODEL_NAME, num_labels=num_classes,
     ).to(DEVICE)
     print(f"  参数量: {sum(p.numel() for p in model.parameters()):,}")
 
-    # 5. 优化器与调度器
+    # 6. 优化器与调度器
     optimizer = AdamW(model.parameters(), lr=BERT_LR)
     total_steps = len(train_loader) * BERT_EPOCHS
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=int(0.1 * total_steps), num_training_steps=total_steps
     )
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 
-    # 6. 训练循环
+    # 7. 训练循环
     print(f"\n开始训练 ({BERT_EPOCHS} epochs)...")
     timer = Timer().tic()
 
-    # data_scale 时保存到独立目录，避免覆盖全量模型
-    scale_suffix = f"_{data_scale}" if data_scale else ""
+    # data_scale 时保存到独立子目录，避免覆盖全量模型
     if data_scale:
-        bert_save_path = str(BERT_MODEL_PATH.parent / f"bert_model_{data_scale}")
+        scale_dir = BERT_MODEL_PATH.parent / str(data_scale)
+        os.makedirs(scale_dir, exist_ok=True)
+        bert_save_path = str(scale_dir / "model")
     else:
         bert_save_path = str(BERT_MODEL_PATH)
 
@@ -220,7 +234,7 @@ def train(data_scale=None):
 
     train_time = timer.toc("BERT 训练")
 
-    # 7. 评估
+    # 8. 评估
     print(f"\n加载最佳模型 (epoch {best_epoch})...")
     model = AutoModelForSequenceClassification.from_pretrained(
         bert_save_path, num_labels=num_classes
@@ -249,26 +263,47 @@ def train(data_scale=None):
         y_true, y_pred, zero_division=0
     )
 
-    metrics_path = bert_save_path + ".metrics.json"
+    if data_scale:
+        scale_dir = BERT_METRICS_PATH.parent / str(data_scale)
+        os.makedirs(scale_dir, exist_ok=True)
+        metrics_path = str(scale_dir / "metrics.json")
+    else:
+        metrics_path = str(BERT_METRICS_PATH)
     metrics = {
         "model": "BERT",
         "data_scale": data_scale if data_scale else "full",
+        "num_classes": num_classes,
+        "num_train_samples": len(train_df),
+        "num_val_samples": len(valid_df),
+        "num_test_samples": len(test_df),
         "accuracy": round(acc, 4),
         "macro_precision": round(prec, 4),
         "macro_recall": round(recall, 4),
         "macro_f1": round(f1, 4),
         "train_time_sec": round(train_time, 2),
+        "test_loss": round(test_loss, 4),
+        "best_epoch": best_epoch,
         "history": history,
+        "hyperparams": {
+            "model_name": BERT_MODEL_NAME,
+            "max_len": max_len,
+            "batch_size": batch_size,
+            "epochs": BERT_EPOCHS,
+            "lr": BERT_LR,
+        },
         "per_class_precision": class_prec.tolist(),
         "per_class_recall": class_recall.tolist(),
         "per_class_f1": class_f1.tolist(),
         "per_class_support": class_support.tolist(),
-        "best_epoch": best_epoch,
-        "test_loss": round(test_loss, 4),
     }
 
     save_json(metrics, metrics_path)
     print(f"  指标 -> {metrics_path}")
+
+    # 绘制训练曲线
+    if not data_scale:
+        from utils import plot_training_history
+        plot_training_history(history, str(BERT_LOSS_CURVE), "BERT")
 
     return metrics
 

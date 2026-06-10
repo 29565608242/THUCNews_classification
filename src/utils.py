@@ -1,4 +1,4 @@
-"""工具函数——计时、日志、指标收集"""
+"""工具函数——计时、日志、指标收集、训练曲线绘图"""
 
 import json
 import os
@@ -75,3 +75,43 @@ class MetricsCollector:
 
     def get_all_records(self) -> List[Dict[str, Any]]:
         return self._data
+
+
+def plot_training_history(history: Dict, save_path: str, model_name: str = "Model"):
+    """绘制训练损失 + 准确率曲线并保存
+
+    Args:
+        history: 包含 train_loss, val_loss, train_acc, val_acc 的 dict
+        save_path: 图片保存路径
+        model_name: 模型名称（用于图标题）
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = range(1, len(history["train_loss"]) + 1)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    # ── 左图: Loss ──
+    ax1.plot(epochs, history["train_loss"], "o-", color="#3498db", label="Train Loss")
+    ax1.plot(epochs, history["val_loss"], "s--", color="#e74c3c", label="Val Loss")
+    ax1.set_title(f"{model_name} Loss", fontsize=13)
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # ── 右图: Accuracy ──
+    ax2.plot(epochs, history["train_acc"], "o-", color="#2ecc71", label="Train Acc")
+    ax2.plot(epochs, history["val_acc"], "s--", color="#e67e22", label="Val Acc")
+    ax2.set_title(f"{model_name} Accuracy", fontsize=13)
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Accuracy")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  训练曲线 -> {save_path}")

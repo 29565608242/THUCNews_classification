@@ -1,176 +1,134 @@
 #!/usr/bin/env python3
-"""数据预处理——读取 THUCNews → 清洗 → 分词 → 去停用词 → 划分 → 保存 CSV"""
+"""将 data/raw_clean/ 的数据转换成训练脚本需要的 CSV 格式
 
-import csv
-import os
-import re
-import glob
-import random
+raw_clean 数据包含:
+  - train/dev/test.jsonl —— 原始文本 (raw text) + 中文标签名
+  - train/dev/test.txt   —— jieba 分词后文本 (segmented text) + 标签 ID
+  - label_map.txt        —— 标签名 -> ID 映射
+
+输出: data/train.csv, data/valid.csv, data/test.csv（与 data.py 输出格式一致）
+"""
+
+import json
+import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
 
-import jieba
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split
 
-from config import (
-    RAW_DATA_DIR, TRAIN_CSV, VALID_CSV, TEST_CSV, LABEL_MAPPING_PATH,
-    TRAIN_RATIO, VAL_RATIO, TEST_RATIO, RANDOM_SEED, MAX_SAMPLES,
-    ensure_dirs,
-)
-from utils import seed_everything, save_json
+ROOT = Path(__file__).resolve().parent.parent
+RAW_CLEAN_DIR = ROOT / "data" / "raw_clean"
+OUT_DIR = ROOT / "data"
+MODEL_DIR = ROOT / "models"
 
 
-# ── 默认停用词（常见高频无意义词） ──
-DEFAULT_STOPWORDS = set(
-    "的了在是我有和就这不人都一个上也很到说要去你会着没看好自己"
-    "这那她它为所么还都可对能下过子时们间头用做面什出里只来进"
-    "生学年中大多如想看得见两地与但而或因被等"
-)
-
-
-def load_stopwords(filepath: Optional[str] = None) -> set:
-    """加载停用词表，若文件不存在则返回默认列表"""
-    if filepath and os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
-            return {line.strip() for line in f if line.strip()}
-    return DEFAULT_STOPWORDS
-
-
-# ── 文本清洗 ──
-
-def clean_text(text: str) -> str:
-    """清洗文本：去 HTML 标签、URL、特殊符号、多余空格"""
-    text = re.sub(r"<[^>]+>", "", text)                     # HTML 标签
-    text = re.sub(r"http\S+|www\.\S+", "", text)             # URL
-    text = re.sub(r"[^一-龥a-zA-Z0-9]+", " ", text)  # 只保留中文、英文字母、数字
-    text = re.sub(r"\s+", " ", text).strip()                  # 合并空格
-    return text
-
-
-def tokenize_and_filter(text: str, stopwords: set) -> str:
-    """jieba 分词 + 去停用词 + 去单字词"""
-    words = jieba.lcut(text)
-    words = [w for w in words if len(w) > 1 and w not in stopwords]
-    return " ".join(words)
-
-
-# ── 读取原始 THUCNews ──
-
-def read_thucnews_raw(data_dir: str, max_samples: Optional[int] = None) -> pd.DataFrame:
-    """
-    读取 THUCNews 原始数据。
-    目录结构: data_dir/<category>/<file> (每个文件一条新闻)
-    """
-    data_dir = Path(data_dir)
-    texts, labels = [], []
-
-    # 按类别文件夹遍历
-    category_dirs = sorted([d for d in data_dir.iterdir() if d.is_dir()])
-    if not category_dirs:
-        raise FileNotFoundError(
-            f"未在 {data_dir} 中找到类别子目录。\n"
-            f"THUCNews 的目录结构应为: raw_dir/<类别名>/<文件名>"
-        )
-
-    print(f"发现 {len(category_dirs)} 个类别: {[d.name for d in category_dirs]}")
-
-    for cat_dir in category_dirs:
-        category = cat_dir.name
-        files = sorted(glob.glob(str(cat_dir / "*")))
-        # 每个类别内随机采样至均衡
-        random.shuffle(files)
-        cat_limit = None if max_samples is None else max_samples // len(category_dirs)
-        files = files[:cat_limit]
-
-        for fpath in files:
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                    text = f.read().strip()
-                if len(text) < 10:  # 跳过过短文本
-                    continue
-                texts.append(text)
-                labels.append(category)
-            except Exception:
+def load_label_map(path: Path) -> dict:
+    """加载 label_map.txt -> {label_name: label_id}"""
+    mapping = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
                 continue
+            name, lid = line.split("\t")
+            mapping[name] = int(lid)
+    return mapping
 
-    df = pd.DataFrame({"text": texts, "label_name": labels})
-    print(f"读取完成: {len(df)} 条新闻, {df['label_name'].nunique()} 个类别")
+
+def prepare_split(jsonl_path: Path, txt_path: Path, label_map: dict) -> pd.DataFrame:
+    """读取一个分片的 jsonl 和 txt，合并为 DataFrame"""
+    # 1. 读取 jsonl（原始文本 + 标签名）
+    raw_texts, label_names = [], []
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            raw_texts.append(obj["text"])
+            label_names.append(obj["label"])
+
+    # 2. 读取 txt（分词后文本 + 标签名）
+    seg_texts, txt_label_names = [], []
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            # 格式: label_name\tsegmented_text
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            lbl, text = parts
+            txt_label_names.append(lbl)
+            seg_texts.append(text)
+
+    # 验证长度一致
+    assert len(raw_texts) == len(seg_texts) == len(label_names) == len(txt_label_names), \
+        f"行数不匹配: jsonl={len(raw_texts)}, txt={len(seg_texts)}"
+
+    # 验证标签名一致
+    for i in range(len(label_names)):
+        assert label_names[i] == txt_label_names[i], \
+            f"第 {i} 行标签不匹配: jsonl={label_names[i]}, txt={txt_label_names[i]}"
+
+    # 3. 获取 label ID
+    label_ids = [label_map[name] for name in label_names]
+
+    # 4. 构建 DataFrame
+    df = pd.DataFrame({
+        "text": seg_texts,
+        "raw_text": raw_texts,
+        "label_name": label_names,
+        "label": label_ids,
+    })
     return df
 
 
-# ── 主流程 ──
-
 def run():
-    """完整的数据预处理流水线"""
-    seed_everything(RANDOM_SEED)
-    ensure_dirs()
-
-    # 1. 读取原始数据
     print("=" * 50)
-    print("步骤 1/6: 读取原始 THUCNews 数据...")
-    df = read_thucnews_raw(RAW_DATA_DIR, max_samples=MAX_SAMPLES)
-    print(f"  原始样本数: {len(df)}")
+    print("使用 raw_clean 数据生成训练 CSV")
+    print("=" * 50)
 
-    # 2. 清洗
-    print("\n步骤 2/6: 清洗文本...")
-    df["text_clean"] = df["text"].apply(clean_text)
-    # 去掉清洗后为空的文本
-    df = df[df["text_clean"].str.len() > 0].reset_index(drop=True)
-    print(f"  清洗后样本数: {len(df)}")
+    # 1. 加载标签映射
+    label_map_fpath = RAW_CLEAN_DIR / "label_map.txt"
+    label_map = load_label_map(label_map_fpath)
+    print(f"标签映射 ({len(label_map)} 类): {label_map}")
 
-    # 3. 保存清洗后的原始文本（BERT 使用原始文本，不传分词结果）
-    df["raw_text"] = df["text_clean"]
+    # 2. 处理各分片
+    splits = {
+        "train.csv": ("train.jsonl", "train.txt"),
+        "valid.csv": ("dev.jsonl", "dev.txt"),
+        "test.csv": ("test.jsonl", "test.txt"),
+    }
 
-    # 4. 分词 + 去停用词（用于 TF-IDF + SVM 和 BiLSTM）
-    print("\n步骤 4/6: jieba 分词 + 去停用词...")
-    stopwords = load_stopwords()
-    df["text"] = df["text_clean"].apply(lambda x: tokenize_and_filter(x, stopwords))
-    df = df[df["text"].str.len() > 0].reset_index(drop=True)
-    print(f"  分词后样本数: {len(df)}")
+    for out_name, (jsonl_name, txt_name) in splits.items():
+        jsonl_path = RAW_CLEAN_DIR / jsonl_name
+        txt_path = RAW_CLEAN_DIR / txt_name
 
-    # 5. 标签编码
-    print("\n步骤 5/6: 标签编码...")
-    le = LabelEncoder()
-    df["label"] = le.fit_transform(df["label_name"])
-    label_mapping = {str(k): int(v) for k, v in zip(le.classes_, le.transform(le.classes_))}
-    save_json(label_mapping, str(LABEL_MAPPING_PATH))
-    print(f"  类别映射: {label_mapping}")
+        print(f"\n处理 {jsonl_name} + {txt_name} ...")
+        df = prepare_split(jsonl_path, txt_path, label_map)
 
-    # 6. 划分 train/valid/test (8:1:1)
-    print("\n步骤 6/6: 划分数据集 (8:1:1)...")
+        out_path = OUT_DIR / out_name
+        df.to_csv(out_path, index=False, encoding="utf-8")
+        print(f"  -> {out_path} ({len(df)} 条)")
 
-    # 先分出 test (10%)
-    train_val, test_df = train_test_split(
-        df, test_size=TEST_RATIO, random_state=RANDOM_SEED, stratify=df["label"],
-    )
-    # 从剩余 90% 中分出 valid (10%/90% = 11.11%)
-    val_ratio_adj = VAL_RATIO / (TRAIN_RATIO + VAL_RATIO)
-    train_df, valid_df = train_test_split(
-        train_val, test_size=val_ratio_adj, random_state=RANDOM_SEED, stratify=train_val["label"],
-    )
+    # 3. 保存 label_mapping.json（供 evaluate.py 使用）
+    label_mapping_json = {name: lid for name, lid in label_map.items()}
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    mapping_out = MODEL_DIR / "label_mapping.json"
+    with open(mapping_out, "w", encoding="utf-8") as f:
+        json.dump(label_mapping_json, f, ensure_ascii=False, indent=2)
+    print(f"\n标签映射 -> {mapping_out}")
 
-    # 恢复 label_name
-    label_inverse = {v: k for k, v in label_mapping.items()}
-    for split_df in [train_df, valid_df, test_df]:
-        split_df["label_name"] = split_df["label"].map(label_inverse)
+    # 4. 打印样本分布
+    print(f"\n数据集概览:")
+    for out_name in splits:
+        df = pd.read_csv(OUT_DIR / out_name)
+        print(f"  {out_name}: {len(df)} 条")
+    print(f"  类别数: {len(label_map)}")
 
-    # 保存
-    train_df.to_csv(TRAIN_CSV, index=False, encoding="utf-8")
-    valid_df.to_csv(VALID_CSV, index=False, encoding="utf-8")
-    test_df.to_csv(TEST_CSV, index=False, encoding="utf-8")
-
-    print(f"\n{'='*50}")
-    print(f"数据预处理完成!")
-    print(f"  训练集: {len(train_df)} 条 -> {TRAIN_CSV}")
-    print(f"  验证集: {len(valid_df)} 条 -> {VALID_CSV}")
-    print(f"  测试集: {len(test_df)} 条 -> {TEST_CSV}")
-    print(f"  类别数: {len(label_mapping)}")
-    print(f"  标签映射 -> {LABEL_MAPPING_PATH}")
-
-    # 打印类别分布
-    print(f"\n类别分布（训练集）:")
+    train_df = pd.read_csv(OUT_DIR / "train.csv")
+    print(f"\n训练集类别分布:")
     dist = train_df["label_name"].value_counts()
     for cat, cnt in dist.items():
         print(f"  {cat}: {cnt}")

@@ -27,6 +27,7 @@ import seaborn as sns
 from config import (
     TRAIN_CSV, VALID_CSV, TEST_CSV,
     SVM_MODEL_PATH, TFIDF_PATH, BILSTM_MODEL_PATH, BERT_MODEL_PATH,
+    BERT_METRICS_PATH, BILSTM_METRICS_PATH, SVM_METRICS_PATH,
     MODEL_DIR, LABEL_MAPPING_PATH,
     CONFUSION_MATRIX_PNG, LOSS_CURVE_PNG, CATEGORY_F1_PNG,
     DATA_SCALE_PNG, METRICS_JSON, REPORT_MD,
@@ -601,9 +602,13 @@ def run():
             "per_class_support": class_support.tolist(),
         }
 
-        # 尝试加载训练时间
-        metrics_path = model_paths[model_key]
-        json_path = Path(str(metrics_path) + ".metrics.json")
+        # 尝试加载训练指标
+        metrics_files = {
+            "svm": SVM_METRICS_PATH,
+            "bilstm": BILSTM_METRICS_PATH,
+            "bert": BERT_METRICS_PATH,
+        }
+        json_path = metrics_files[model_key]
         if json_path.exists():
             saved_metrics = json.load(open(json_path, "r"))
             if "train_time_sec" in saved_metrics:
@@ -632,8 +637,8 @@ def run():
     if all_metrics:
         plot_category_f1({m["model"]: m for m in all_metrics}, class_names, str(CATEGORY_F1_PNG))
 
-    # 尝试加载数据量实验结果（从模型目录读取 *_<数字>.metrics.json）
-    data_scale_files = sorted(MODEL_DIR.glob("*_[0-9]*.metrics.json"))
+    # 尝试加载数据量实验结果（从各模型子目录读取 <数字>/metrics.json）
+    data_scale_files = sorted(MODEL_DIR.glob("*/[0-9]*/metrics.json"))
     if data_scale_files:
         ds_results = []
         for f in data_scale_files:

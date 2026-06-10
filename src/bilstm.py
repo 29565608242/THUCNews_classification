@@ -2,7 +2,9 @@
 """BiLSTM 模型——定义、训练与评估"""
 
 import argparse
+import os
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -10,10 +12,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+from sklearn.utils.class_weight import compute_class_weight
 from tqdm import tqdm
 
 from config import (
-    TRAIN_CSV, VALID_CSV, TEST_CSV, BILSTM_MODEL_PATH,
+    TRAIN_CSV, VALID_CSV, TEST_CSV, BILSTM_MODEL_PATH, BILSTM_METRICS_PATH,
+    BILSTM_LOSS_CURVE,
     BILSTM_MAX_LEN, BILSTM_EMBEDDING_DIM, BILSTM_HIDDEN_DIM,
     BILSTM_NUM_LAYERS, BILSTM_DROPOUT, BILSTM_DROPOUT_EMBED,
     BILSTM_BATCH_SIZE, BILSTM_EPOCHS, BILSTM_LR, BILSTM_LR_MIN,
@@ -120,10 +124,11 @@ class BiLSTMClassifier(nn.Module):
 
 # ── 训练 ──
 
-def train_epoch(model, loader, optimizer, criterion, max_grad_norm=5.0):
+def train_epoch(model, loader, optimizer, criterion, max_grad_norm=5.0, epoch=None, total_epochs=None):
     model.train()
     total_loss, total_correct, total = 0, 0, 0
-    for inputs, labels in loader:
+    desc = f"Epoch {epoch}/{total_epochs}" if epoch else "训练"
+    for inputs, labels in tqdm(loader, desc=desc, leave=False):
         inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -138,12 +143,12 @@ def train_epoch(model, loader, optimizer, criterion, max_grad_norm=5.0):
     return total_loss / total, total_correct / total
 
 
-def evaluate(model, loader, criterion):
+def evaluate(model, loader, criterion, desc="评估"):
     model.eval()
     total_loss, total_correct, total = 0, 0, 0
     all_preds, all_labels = [], []
     with torch.no_grad():
-        for inputs, labels in loader:
+        for inputs, labels in tqdm(loader, desc=desc, leave=False):
             inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -221,7 +226,17 @@ def train(data_scale=None, params_override=None):
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size)
     test_loader = DataLoader(test_dataset, batch_size=batch_size)
 
-    # 4. 初始化模型
+    # 4. 计算类别权重（解决不平衡）
+    print("\n计算类别权重...")
+    class_weights = compute_class_weight(
+        "balanced", classes=np.unique(train_df["label"].values),
+        y=train_df["label"].values,
+    )
+    weight_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
+    for i, w in enumerate(class_weights):
+        print(f"  类别 {i}: weight={w:.4f}")
+
+    # 6. 初始化模型
     print("\n初始化 BiLSTM 模型...")
     model = BiLSTMClassifier(
         vocab_size=vocab_size,
@@ -235,7 +250,7 @@ def train(data_scale=None, params_override=None):
     ).to(DEVICE)
     print(f"  参数量: {sum(p.numel() for p in model.parameters()):,}")
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1, weight=weight_tensor)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=p["lr"], weight_decay=p["weight_decay"],
     )
@@ -249,7 +264,7 @@ def train(data_scale=None, params_override=None):
             min_lr=p["lr_min"],
         )
 
-    # 5. 训练循环
+    # 7. 训练循环
     print(f"\n开始训练 ({p['epochs']} epochs)...")
     timer = Timer().tic()
 
@@ -259,8 +274,8 @@ def train(data_scale=None, params_override=None):
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "lr": []}
 
     for epoch in range(1, p["epochs"] + 1):
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, max_grad_norm)
-        val_loss, val_acc, _, _ = evaluate(model, valid_loader, criterion)
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, max_grad_norm, epoch=epoch, total_epochs=p["epochs"])
+        val_loss, val_acc, _, _ = evaluate(model, valid_loader, criterion, desc="验证")
 
         current_lr = optimizer.param_groups[0]["lr"]
         history["train_loss"].append(round(train_loss, 4))
@@ -292,12 +307,12 @@ def train(data_scale=None, params_override=None):
 
     train_time = timer.toc("BiLSTM 训练")
 
-    # 6. 加载最佳模型并评估
+    # 8. 加载最佳模型并评估
     print(f"\n加载最佳模型 (epoch {best_epoch})...")
     model.load_state_dict(torch.load(str(BILSTM_MODEL_PATH), map_location=DEVICE))
 
     print("测试集评估...")
-    test_loss, test_acc, test_preds, test_labels = evaluate(model, test_loader, criterion)
+    test_loss, test_acc, test_preds, test_labels = evaluate(model, test_loader, criterion, desc="测试")
 
     from sklearn.metrics import precision_recall_fscore_support, accuracy_score
     acc = accuracy_score(test_labels, test_preds)
@@ -319,34 +334,47 @@ def train(data_scale=None, params_override=None):
         test_labels, test_preds, zero_division=0
     )
 
-    scale_suffix = f"_{data_scale}" if data_scale else ""
-    model_path = str(BILSTM_MODEL_PATH).replace(".pt", f"{scale_suffix}.pt")
-    metrics_path = model_path + ".metrics.json"
-
-    # data_scale 时保存模型到独立文件，避免覆盖全量模型
     if data_scale:
+        scale_dir = Path(BILSTM_MODEL_PATH).parent / str(data_scale)
+        os.makedirs(scale_dir, exist_ok=True)
+        model_path = str(scale_dir / "model.pt")
+        metrics_path = str(scale_dir / "metrics.json")
         torch.save(model.state_dict(), model_path)
         print(f"  模型 -> {model_path}")
+    else:
+        model_path = str(BILSTM_MODEL_PATH)
+        metrics_path = str(BILSTM_METRICS_PATH)
 
     metrics = {
         "model": "BiLSTM",
         "data_scale": data_scale if data_scale else "full",
+        "num_classes": num_classes,
+        "num_train_samples": len(train_df),
+        "num_val_samples": len(valid_df),
+        "num_test_samples": len(test_df),
+        "vocab_size": len(vocab),
         "accuracy": round(acc, 4),
         "macro_precision": round(prec, 4),
         "macro_recall": round(recall, 4),
         "macro_f1": round(f1, 4),
         "train_time_sec": round(train_time, 2),
+        "test_loss": round(test_loss, 4),
+        "best_epoch": best_epoch,
         "history": history,
+        "hyperparams": {k: v for k, v in p.items() if k != "use_scheduler"},
         "per_class_precision": class_prec.tolist(),
         "per_class_recall": class_recall.tolist(),
         "per_class_f1": class_f1.tolist(),
         "per_class_support": class_support.tolist(),
-        "best_epoch": best_epoch,
-        "test_loss": round(test_loss, 4),
     }
 
     save_json(metrics, metrics_path)
     print(f"  指标 -> {metrics_path}")
+
+    # 绘制训练曲线
+    if not data_scale:
+        from utils import plot_training_history
+        plot_training_history(history, str(BILSTM_LOSS_CURVE), "BiLSTM")
 
     return metrics
 
