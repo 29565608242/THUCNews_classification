@@ -30,37 +30,53 @@ from utils import seed_everything, Timer, save_json
 # ── 数据集 ──
 
 class BertDataset(Dataset):
-    """BERT 格式数据集（使用原始文本，BERT tokenizer 编码）"""
+    """BERT 数据集——预分词，避免每轮重复调用 tokenizer"""
 
-    def __init__(self, texts, labels, tokenizer, max_len):
-        self.texts = list(texts)
-        self.labels = list(labels)
-        self.tokenizer = tokenizer
-        self.max_len = max_len
+    def __init__(self, input_ids, attention_mask, labels):
+        self.input_ids = input_ids
+        self.attention_mask = attention_mask
+        self.labels = labels
 
     def __len__(self):
-        return len(self.texts)
+        return len(self.labels)
 
     def __getitem__(self, idx):
-        text = str(self.texts[idx])
-        label = self.labels[idx]
-        encoding = self.tokenizer(
-            text,
+        return {
+            "input_ids": self.input_ids[idx],
+            "attention_mask": self.attention_mask[idx],
+            "label": self.labels[idx],
+        }
+
+
+def tokenize_dataset(texts, labels, tokenizer, max_len, batch_size=5000):
+    """分批 tokenize 整个数据集，避免一次加载全部文本到内存"""
+    print(f"  预分词 {len(texts)} 条文本（分批 {batch_size}）...")
+    all_input_ids, all_attention_mask = [], []
+    labels = list(labels)
+    texts = list(texts)
+
+    for i in tqdm(range(0, len(texts), batch_size), desc="预分词", unit="批"):
+        batch_texts = texts[i:i + batch_size]
+        encoding = tokenizer(
+            batch_texts,
             truncation=True,
             padding="max_length",
-            max_length=self.max_len,
+            max_length=max_len,
             return_tensors="pt",
         )
-        return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "label": torch.tensor(label, dtype=torch.long),
-        }
+        all_input_ids.append(encoding["input_ids"])
+        all_attention_mask.append(encoding["attention_mask"])
+
+    return BertDataset(
+        torch.cat(all_input_ids, dim=0),
+        torch.cat(all_attention_mask, dim=0),
+        torch.tensor(labels, dtype=torch.long),
+    )
 
 
 # ── 训练 ──
 
-def train_epoch(model, loader, optimizer, scheduler, criterion):
+def train_epoch(model, loader, optimizer, scheduler, criterion, scaler=None):
     model.train()
     total_loss, total_correct, total = 0, 0, 0
     for batch in tqdm(loader, desc="训练", leave=False):
@@ -69,12 +85,20 @@ def train_epoch(model, loader, optimizer, scheduler, criterion):
         labels = batch["label"].to(DEVICE)
 
         optimizer.zero_grad()
-        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs.loss
-        logits = outputs.logits
 
-        loss.backward()
-        optimizer.step()
+        with torch.amp.autocast("cuda"):
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+            logits = outputs.logits
+
+        if scaler:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+
         if scheduler:
             scheduler.step()
 
@@ -138,7 +162,7 @@ def train(data_scale=None):
     print(f"\n加载 tokenizer: {BERT_MODEL_NAME}...")
     tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_NAME)
 
-    # 3. 数据加载器
+    # 3. 预分词（全部数据 tokenize 一次，后续不再走 tokenizer）
     batch_size = BERT_BATCH_SIZE
     # 显存不足时自动降级
     if torch.cuda.is_available():
@@ -156,13 +180,17 @@ def train(data_scale=None):
     else:
         print("未找到 raw_text 列，回退到 text（分词后文本）")
 
-    train_dataset = BertDataset(train_df[text_col].values, train_df["label"].values, tokenizer, max_len)
-    valid_dataset = BertDataset(valid_df[text_col].values, valid_df["label"].values, tokenizer, max_len)
-    test_dataset = BertDataset(test_df[text_col].values, test_df["label"].values, tokenizer, max_len)
+    train_dataset = tokenize_dataset(train_df[text_col], train_df["label"].values, tokenizer, max_len)
+    valid_dataset = tokenize_dataset(valid_df[text_col], valid_df["label"].values, tokenizer, max_len)
+    test_dataset = tokenize_dataset(test_df[text_col], test_df["label"].values, tokenizer, max_len)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    valid_loader = DataLoader(valid_dataset, batch_size=batch_size)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    num_workers = min(4, os.cpu_count() or 1)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=batch_size,
+                              num_workers=num_workers, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size,
+                             num_workers=num_workers, pin_memory=True)
 
     # 4. 计算类别权重（解决不平衡）
     print("\n计算类别权重...")
@@ -189,9 +217,12 @@ def train(data_scale=None):
     )
     criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 
-    # 7. 训练循环
+    # 7. 训练循环（使用混合精度加速）
     print(f"\n开始训练 ({BERT_EPOCHS} epochs)...")
     timer = Timer().tic()
+    scaler = torch.cuda.amp.GradScaler() if DEVICE == "cuda" else None
+    if scaler:
+        print("使用混合精度训练 (fp16)")
 
     # data_scale 时保存到独立子目录，避免覆盖全量模型
     if data_scale:
@@ -208,7 +239,7 @@ def train(data_scale=None):
 
     for epoch in range(1, BERT_EPOCHS + 1):
         print(f"\nEpoch {epoch}/{BERT_EPOCHS}")
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, scheduler, criterion)
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, scheduler, criterion, scaler=scaler)
         val_loss, val_acc, _, _ = evaluate(model, valid_loader, criterion)
 
         history["train_loss"].append(round(train_loss, 4))

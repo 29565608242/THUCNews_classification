@@ -71,8 +71,8 @@ BILSTM_POOLING = "mean_max"        # pooling 方式: "max" | "mean" | "mean_max"
 
 # ── BERT 参数（全量数据 66w 适配）──
 BERT_MODEL_NAME = "hfl/chinese-roberta-wwm-ext"
-BERT_MAX_LEN = 128                # 256→128: 分类任务足够，attention 快 4 倍
-BERT_BATCH_SIZE = 32              # 16→32: 加速收敛（注意显存）
+BERT_MAX_LEN = 256                 # 128→256: 保留更多上下文
+BERT_BATCH_SIZE = 64               # 32→64: 充分利用 GPU
 BERT_EPOCHS = 3
 BERT_LR = 2e-5
 

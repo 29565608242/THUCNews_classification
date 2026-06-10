@@ -16,7 +16,7 @@ python src/prepare_raw_clean.py
 # 3-5. 训练三个模型（全量数据）
 python src/tfidf_svm.py            # 约 5-15 分钟
 python src/bilstm.py                # 约 30-60 分钟（GPU）
-python src/bert_model.py            # 约 6-12 小时（GPU，视显存而定）
+python src/bert_model.py            # 约 2-4 小时（GPU，batch=64, fp16）
 
 # 6. 综合评估 + 可视化图表 + 实验报告
 python src/evaluate.py
@@ -156,8 +156,8 @@ nlp/
 | 参数 | 值 |
 |------|-----|
 | 预训练模型 | hfl/chinese-roberta-wwm-ext |
-| 序列长度 | 128 |
-| 批大小 | 32 |
+| 序列长度 | 256 |
+| 批大小 | 64 |
 | 学习率 | 2e-5 |
 | 训练轮数 | 3（含 Early Stopping）|
 

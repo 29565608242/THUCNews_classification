@@ -3,6 +3,7 @@
 
 import argparse
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from collections import Counter
 from pathlib import Path
 
