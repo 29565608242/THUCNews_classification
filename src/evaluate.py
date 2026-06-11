@@ -42,7 +42,7 @@ from config import (
 from utils import seed_everything, save_json, Timer
 
 # ── 全局字体 ──
-plt.rcParams["font.sans-serif"] = ["Droid Sans Fallback", "Noto Sans CJK SC", "SimHei", "DejaVu Sans"]
+plt.rcParams["font.sans-serif"] = ["AR PL UKai CN", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
 
