@@ -43,8 +43,10 @@ def train(data_scale=None):
     test_df = pd.read_csv(TEST_CSV)
 
     if data_scale and len(train_df) > data_scale:
+        scale_ratio = data_scale / len(train_df)
         train_df = train_df.sample(n=data_scale, random_state=RANDOM_SEED)
-        tqdm.write(f"采样训练数据: {data_scale} 条")
+        test_df = test_df.sample(n=max(1, int(len(test_df) * scale_ratio)), random_state=RANDOM_SEED)
+        tqdm.write(f"按比例采样: train={len(train_df)}, test={len(test_df)}")
     tqdm.write(f"训练集: {len(train_df)} 条, 测试集: {len(test_df)} 条")
 
     X_train = train_df["text"].values

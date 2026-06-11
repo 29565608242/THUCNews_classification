@@ -55,6 +55,8 @@ nlp/
 │       ├── metrics.json
 │       └── loss_curve.png
 │
+├── run_data_scale.sh               # 数据量实验一键脚本
+│
 ├── results/                        # 综合评估输出
 │   ├── metrics.json                # 三个模型的汇总指标
 │   ├── report.md                   # 自动生成的实验报告
@@ -66,12 +68,18 @@ nlp/
 └── src/                            # 源代码
     ├── config.py                   # 全局配置（路径、超参数）
     ├── utils.py                    # 工具函数（计时、种子、绘图等）
+    │
     ├── prepare_raw_clean.py        # raw_clean → CSV 转换
     ├── data.py                     # 原始数据预处理流水线（可选）
+    │
     ├── tfidf_svm.py                # TF-IDF + SVM 训练
     ├── bilstm.py                   # BiLSTM 训练
     ├── bert_model.py               # BERT 微调
-    └── evaluate.py                 # 综合评估 + 可视化 + 报告
+    │
+    ├── eval_models.py              # 评估：模型加载与推理（SVM / BiLSTM / BERT）
+    ├── eval_visualize.py           # 评估：图表绘制（混淆矩阵、损失曲线、F1 热力图等）
+    ├── eval_report.py              # 评估：Markdown 实验报告生成
+    └── evaluate.py                 # 评估入口：编排上述模块，执行完整评估流程
 ```
 
 ---
@@ -208,22 +216,83 @@ python src/bert_model.py
 
 ### 数据量实验
 
-```bash
-# 在数据子集上训练，结果保存到独立子目录
-python src/tfidf_svm.py --data_scale 5000
-python src/bilstm.py   --data_scale 10000
-python src/bert_model.py --data_scale 20000
+支持在数据子集上训练，探索数据量对模型性能的影响。三个数据集（train/valid/test）按 **同比例缩小**。
+
+可用的数据量梯度（在 `src/config.py` 的 `DATA_SCALE_OPTIONS` 中配置）：
+
+```
+20000, 50000, 100000, 200000, 400000, 全量(~66.5w)
 ```
 
-保存结构：
+#### 一键跑全部
+
+```bash
+bash run_data_scale.sh              # 跑全部模型（SVM → BiLSTM → BERT）
+bash run_data_scale.sh svm          # 只跑 SVM
+bash run_data_scale.sh bilstm       # 只跑 BiLSTM
+bash run_data_scale.sh bert         # 只跑 BERT
+bash run_data_scale.sh clean        # 清理旧实验结果
+```
+
+#### 手动逐条运行
+
+```bash
+python src/tfidf_svm.py --data_scale 20000
+python src/bilstm.py   --data_scale 50000
+python src/bert_model.py --data_scale 100000
+# 不传 --data_scale 表示全量
+python src/tfidf_svm.py
+```
+
+#### 保存结构
+
 ```
 models/svm/
 ├── model.pkl, metrics.json              ← 全量
-└── 5000/
-    ├── model.pkl, metrics.json          ← 5k 条实验
+├── 20000/model.pkl, metrics.json        ← 20k 条实验
+├── 50000/...
+├── 100000/...
+├── 200000/...
+└── 400000/...
 ```
 
-之后运行 `python src/evaluate.py` 会自动扫描这些子目录，生成数据量影响图。
+---
+
+## 数据量实验评估
+
+单独分析指定模型在**不同数据量下的性能变化**，生成数据量 vs Macro-F1 曲线图。
+
+### 仅分析数据量（跳过完整评估）
+
+```bash
+# 对比指定模型
+python src/evaluate.py --data-scale-only --models svm,bilstm
+
+# 只看某个模型
+python src/evaluate.py --data-scale-only --models bert
+
+# 全部模型
+python src/evaluate.py --data-scale-only
+```
+
+### 评估并包含数据量分析
+
+```bash
+# 完整评估 + 数据量图（指定模型）
+python src/evaluate.py --models svm,bilstm
+
+# 完整评估 + 数据量图（全部模型）
+python src/evaluate.py
+```
+
+输出：
+
+| 文件 | 内容 |
+| --- | --- |
+| `results/data_scale_vs_f1.png` | 选定模型的数据量 vs Macro-F1 曲线 |
+| `results/metrics.json` | 含数据量实验指标 |
+
+会自动扫描 `models/*/[0-9]*/metrics.json`，绘制 **数据量 vs Macro-F1** 曲线图到 `results/data_scale_vs_f1.png`。
 
 ---
 
@@ -233,7 +302,36 @@ models/svm/
 python src/evaluate.py
 ```
 
-输出（全部在 `results/` 目录）：
+### 代码架构
+
+评估功能已拆分为四个模块，各司其职：
+
+| 模块 | 职责 | 关键函数 |
+| --- | --- | --- |
+| `eval_models.py` | 模型加载、推理 | `load_label_mapping()`, `load_svm()`, `load_bilstm()`, `load_bert()`, `predict_with_model()` |
+| `eval_visualize.py` | 图表绘制 | `plot_confusion_matrix()`, `plot_loss_curve()`, `plot_category_f1()`, `plot_data_scale_effect()`, `run_data_scale_analysis()` |
+| `eval_report.py` | 报告生成 | `generate_report()` |
+| `evaluate.py` | **编排入口**（~240 行） | 导入上述模块，串联评估流程 |
+
+### 评估流程
+
+`evaluate.py` 的 `run()` 函数按以下步骤执行：
+
+1. 确定输出路径（支持 `data_scale` 子目录隔离）
+2. 加载标签映射（`eval_models.load_label_mapping`）
+3. 遍历指定模型，对每模型执行：
+   - 检查模型文件是否存在
+   - `predict_with_model()` 批量推理
+   - 计算 Accuracy / Macro Precision / Recall / F1
+   - 加载训练阶段的 `metrics.json`（含训练时间、损失历史）
+4. 保存汇总指标到 `metrics.json`
+5. `eval_visualize` — 绘制混淆矩阵、损失曲线、类别 F1 热力图
+6. `run_data_scale_analysis` — 扫描数据量实验结果并绘图（仅全量评估）
+7. `eval_report.generate_report` — 生成 Markdown 报告
+
+### 输出
+
+所有输出在 `results/` 目录：
 
 | 文件 | 内容 |
 |------|------|

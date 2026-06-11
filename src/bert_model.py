@@ -151,8 +151,11 @@ def train(data_scale=None):
     test_df = pd.read_csv(TEST_CSV)
 
     if data_scale and len(train_df) > data_scale:
+        scale_ratio = data_scale / len(train_df)
         train_df = train_df.sample(n=data_scale, random_state=RANDOM_SEED)
-        print(f"采样训练数据: {data_scale} 条")
+        valid_df = valid_df.sample(n=max(1, int(len(valid_df) * scale_ratio)), random_state=RANDOM_SEED)
+        test_df = test_df.sample(n=max(1, int(len(test_df) * scale_ratio)), random_state=RANDOM_SEED)
+        print(f"按比例采样: train={len(train_df)}, valid={len(valid_df)}, test={len(test_df)}")
 
     num_classes = max(train_df["label_name"].max(), valid_df["label_name"].max(), test_df["label_name"].max()) + 1
     print(f"类别数: {num_classes}")
@@ -330,11 +333,6 @@ def train(data_scale=None):
 
     save_json(metrics, metrics_path)
     print(f"  指标 -> {metrics_path}")
-
-    # 绘制训练曲线
-    if not data_scale:
-        from utils import plot_training_history
-        plot_training_history(history, str(BERT_LOSS_CURVE), "BERT")
 
     return metrics
 

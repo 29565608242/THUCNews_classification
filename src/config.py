@@ -91,7 +91,7 @@ EARLY_STOP_PATIENCE = 6
 DEVICE = "cuda" if __import__("torch").cuda.is_available() else "cpu"
 
 # ── 数据量实验配置 ──
-DATA_SCALE_OPTIONS = [5000, 10000, 20000, None]  # None 表示全量
+DATA_SCALE_OPTIONS = [30000, 50000, 100000, 200000, 400000, None]  # None 表示全量(~66.5w)
 
 
 def ensure_dirs():
