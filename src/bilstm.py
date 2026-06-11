@@ -207,7 +207,7 @@ def train(data_scale=None, params_override=None):
         train_df = train_df.sample(n=data_scale, random_state=RANDOM_SEED)
         print(f"采样训练数据: {data_scale} 条")
 
-    num_classes = max(train_df["label"].max(), valid_df["label"].max(), test_df["label"].max()) + 1
+    num_classes = max(train_df["label_name"].max(), valid_df["label_name"].max(), test_df["label_name"].max()) + 1
     print(f"类别数: {num_classes}")
     print(f"训练集: {len(train_df)}, 验证集: {len(valid_df)}, 测试集: {len(test_df)}")
 
@@ -219,9 +219,9 @@ def train(data_scale=None, params_override=None):
 
     # 3. 数据加载器
     batch_size = p["batch_size"]
-    train_dataset = TextDataset(train_df["text"].values, train_df["label"].values, vocab, p["max_len"])
-    valid_dataset = TextDataset(valid_df["text"].values, valid_df["label"].values, vocab, p["max_len"])
-    test_dataset = TextDataset(test_df["text"].values, test_df["label"].values, vocab, p["max_len"])
+    train_dataset = TextDataset(train_df["text"].values, train_df["label_name"].values, vocab, p["max_len"])
+    valid_dataset = TextDataset(valid_df["text"].values, valid_df["label_name"].values, vocab, p["max_len"])
+    test_dataset = TextDataset(test_df["text"].values, test_df["label_name"].values, vocab, p["max_len"])
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size)
@@ -230,8 +230,8 @@ def train(data_scale=None, params_override=None):
     # 4. 计算类别权重（解决不平衡）
     print("\n计算类别权重...")
     class_weights = compute_class_weight(
-        "balanced", classes=np.unique(train_df["label"].values),
-        y=train_df["label"].values,
+        "balanced", classes=np.unique(train_df["label_name"].values),
+        y=train_df["label_name"].values,
     )
     weight_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
     for i, w in enumerate(class_weights):

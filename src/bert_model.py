@@ -154,7 +154,7 @@ def train(data_scale=None):
         train_df = train_df.sample(n=data_scale, random_state=RANDOM_SEED)
         print(f"采样训练数据: {data_scale} 条")
 
-    num_classes = max(train_df["label"].max(), valid_df["label"].max(), test_df["label"].max()) + 1
+    num_classes = max(train_df["label_name"].max(), valid_df["label_name"].max(), test_df["label_name"].max()) + 1
     print(f"类别数: {num_classes}")
     print(f"训练集: {len(train_df)}, 验证集: {len(valid_df)}, 测试集: {len(test_df)}")
 
@@ -180,9 +180,9 @@ def train(data_scale=None):
     else:
         print("未找到 raw_text 列，回退到 text（分词后文本）")
 
-    train_dataset = tokenize_dataset(train_df[text_col], train_df["label"].values, tokenizer, max_len)
-    valid_dataset = tokenize_dataset(valid_df[text_col], valid_df["label"].values, tokenizer, max_len)
-    test_dataset = tokenize_dataset(test_df[text_col], test_df["label"].values, tokenizer, max_len)
+    train_dataset = tokenize_dataset(train_df[text_col], train_df["label_name"].values, tokenizer, max_len)
+    valid_dataset = tokenize_dataset(valid_df[text_col], valid_df["label_name"].values, tokenizer, max_len)
+    test_dataset = tokenize_dataset(test_df[text_col], test_df["label_name"].values, tokenizer, max_len)
 
     num_workers = min(4, os.cpu_count() or 1)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
@@ -195,8 +195,8 @@ def train(data_scale=None):
     # 4. 计算类别权重（解决不平衡）
     print("\n计算类别权重...")
     class_weights = compute_class_weight(
-        "balanced", classes=np.unique(train_df["label"].values),
-        y=train_df["label"].values,
+        "balanced", classes=np.unique(train_df["label_name"].values),
+        y=train_df["label_name"].values,
     )
     weight_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
     for i, w in enumerate(class_weights):
