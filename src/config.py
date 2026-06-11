@@ -48,20 +48,30 @@ TEST_RATIO = 0.1
 RANDOM_SEED = 42
 MAX_SAMPLES = None           # 从原始数据中最多读取的样本数；None 表示不限制
 STOPWORDS_FILE = None        # 停用词表路径；None 使用内置默认列表
+MIN_TEXT_LENGTH = 10          # 最短文本长度（字符数）
+MIN_CHINESE_RATIO = 0.3       # 最低中文字符占比
+MAX_TEXT_LENGTH = 50000       # 最长文本长度（字符数），超出截断
+
+# ── 文本规范化开关（rebuild_data.py 使用）──
+NORMALIZE_HTML = True         # 去除 HTML 标签
+NORMALIZE_URL = True          # 去除 URL 和邮箱地址
+NORMALIZE_FULLWIDTH = True    # 全角字母数字→半角
+NORMALIZE_REPEAT = True       # 压缩连续重复字符
+DEDUP_ENABLED = True          # 训练前基于文本去重
 
 # ── TF-IDF + SVM 参数 ──
 TFIDF_MAX_FEATURES = 100000
 TFIDF_NGRAM_RANGE = (1, 2)
 
 # ── BiLSTM 参数（全量数据 66w 适配）──
-BILSTM_MAX_LEN = 200              # 400→200: 关键信息集中在前半段，训练快 2 倍
+BILSTM_MAX_LEN = 48               # 200→48: 覆盖 P99.9(36)，大幅减少 padding 噪声
 BILSTM_EMBEDDING_DIM = 300
-BILSTM_HIDDEN_DIM = 256
+BILSTM_HIDDEN_DIM = 512            # 256→512: 增大容量，解决欠拟合
 BILSTM_NUM_LAYERS = 2
 BILSTM_DROPOUT = 0.2              # 0.3→0.2: 66w 数据下降一点正则化
 BILSTM_DROPOUT_EMBED = 0.2        # Embedding 层 dropout
-BILSTM_BATCH_SIZE = 256            # 128→256: 显存够的话训练快 1 倍
-BILSTM_EPOCHS = 30
+BILSTM_BATCH_SIZE = 1024           # 256→1024: 4 卡 DataParallel 每卡 256
+BILSTM_EPOCHS = 20
 BILSTM_LR = 1e-3
 BILSTM_LR_MIN = 1e-5              # 最小学习率
 BILSTM_WEIGHT_DECAY = 1e-4        # L2 正则化

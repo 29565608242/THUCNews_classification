@@ -10,6 +10,21 @@ import numpy as np
 import torch
 
 
+class NumpyEncoder(json.JSONEncoder):
+    """让 json.dump 支持 numpy 数值类型"""
+
+    def default(self, obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
 def seed_everything(seed: int = 42):
     """固定所有随机种子以保证可复现"""
     random.seed(seed)
@@ -39,10 +54,10 @@ class Timer:
 
 
 def save_json(obj: Any, path: str):
-    """保存 JSON 文件"""
+    """保存 JSON 文件（兼容 numpy 类型）"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        json.dump(obj, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 
 
 def load_json(path: str) -> Any:
