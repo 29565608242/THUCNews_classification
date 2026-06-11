@@ -18,17 +18,17 @@ MODEL_SVM_DIR = MODEL_DIR / "svm"
 MODEL_BILSTM_DIR = MODEL_DIR / "bilstm"
 MODEL_BERT_DIR = MODEL_DIR / "bert"
 
-SVM_MODEL_PATH = MODEL_SVM_DIR / "model.pkl"
-TFIDF_PATH = MODEL_SVM_DIR / "tfidf_vectorizer.pkl"
-SVM_METRICS_PATH = MODEL_SVM_DIR / "metrics.json"
+SVM_MODEL_PATH = MODEL_SVM_DIR / "full" / "model.pkl"
+TFIDF_PATH = MODEL_SVM_DIR / "full" / "tfidf_vectorizer.pkl"
+SVM_METRICS_PATH = MODEL_SVM_DIR / "full" / "metrics.json"
 
-BILSTM_MODEL_PATH = MODEL_BILSTM_DIR / "model.pt"
-BILSTM_METRICS_PATH = MODEL_BILSTM_DIR / "metrics.json"
-BILSTM_LOSS_CURVE = MODEL_BILSTM_DIR / "loss_curve.png"
+BILSTM_MODEL_PATH = MODEL_BILSTM_DIR / "full" / "model.pt"
+BILSTM_METRICS_PATH = MODEL_BILSTM_DIR / "full" / "metrics.json"
+BILSTM_LOSS_CURVE = MODEL_BILSTM_DIR / "full" / "loss_curve.png"
 
-BERT_MODEL_PATH = MODEL_BERT_DIR / "model"
-BERT_METRICS_PATH = MODEL_BERT_DIR / "metrics.json"
-BERT_LOSS_CURVE = MODEL_BERT_DIR / "loss_curve.png"
+BERT_MODEL_PATH = MODEL_BERT_DIR / "full" / "model"
+BERT_METRICS_PATH = MODEL_BERT_DIR / "full" / "metrics.json"
+BERT_LOSS_CURVE = MODEL_BERT_DIR / "full" / "loss_curve.png"
 
 LABEL_MAPPING_PATH = MODEL_DIR / "label_mapping.json"
 
@@ -97,4 +97,7 @@ DATA_SCALE_OPTIONS = [30000, 50000, 100000, 200000, 400000, None]  # None 表示
 def ensure_dirs():
     """确保所有需要的目录存在"""
     for d in [RAW_DATA_DIR, MODEL_DIR, MODEL_SVM_DIR, MODEL_BILSTM_DIR, MODEL_BERT_DIR, RESULT_DIR]:
+        os.makedirs(d, exist_ok=True)
+    # 全量数据模型保存子目录
+    for d in [MODEL_SVM_DIR / "full", MODEL_BILSTM_DIR / "full", MODEL_BERT_DIR / "full"]:
         os.makedirs(d, exist_ok=True)

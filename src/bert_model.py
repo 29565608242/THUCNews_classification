@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from config import (
     TRAIN_CSV, VALID_CSV, TEST_CSV, BERT_MODEL_PATH, BERT_METRICS_PATH,
-    BERT_LOSS_CURVE,
+    BERT_LOSS_CURVE, MODEL_BERT_DIR,
     BERT_MODEL_NAME, BERT_MAX_LEN, BERT_BATCH_SIZE,
     BERT_EPOCHS, BERT_LR, RANDOM_SEED, EARLY_STOP_PATIENCE,
     DEVICE, ensure_dirs,
@@ -229,7 +229,7 @@ def train(data_scale=None):
 
     # data_scale 时保存到独立子目录，避免覆盖全量模型
     if data_scale:
-        scale_dir = BERT_MODEL_PATH.parent / str(data_scale)
+        scale_dir = MODEL_BERT_DIR / str(data_scale)
         os.makedirs(scale_dir, exist_ok=True)
         bert_save_path = str(scale_dir / "model")
     else:
@@ -298,9 +298,7 @@ def train(data_scale=None):
     )
 
     if data_scale:
-        scale_dir = BERT_METRICS_PATH.parent / str(data_scale)
-        os.makedirs(scale_dir, exist_ok=True)
-        metrics_path = str(scale_dir / "metrics.json")
+        metrics_path = str(MODEL_BERT_DIR / str(data_scale) / "metrics.json")
     else:
         metrics_path = str(BERT_METRICS_PATH)
     metrics = {

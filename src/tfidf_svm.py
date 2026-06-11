@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from config import (
     TRAIN_CSV, TEST_CSV, SVM_MODEL_PATH, TFIDF_PATH, SVM_METRICS_PATH,
+    MODEL_SVM_DIR,
     TFIDF_MAX_FEATURES, TFIDF_NGRAM_RANGE, RANDOM_SEED,
     ensure_dirs,
 )
@@ -115,7 +116,7 @@ def train(data_scale=None):
     # 5. 保存
     print(f"\n保存模型...")
     if data_scale:
-        scale_dir = Path(SVM_MODEL_PATH).parent / str(data_scale)
+        scale_dir = MODEL_SVM_DIR / str(data_scale)
         os.makedirs(scale_dir, exist_ok=True)
         svm_path = str(scale_dir / "model.pkl")
         tfidf_path = str(scale_dir / "tfidf_vectorizer.pkl")

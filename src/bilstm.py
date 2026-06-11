@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from config import (
     TRAIN_CSV, VALID_CSV, TEST_CSV, BILSTM_MODEL_PATH, BILSTM_METRICS_PATH,
-    BILSTM_LOSS_CURVE,
+    BILSTM_LOSS_CURVE, MODEL_BILSTM_DIR,
     BILSTM_MAX_LEN, BILSTM_EMBEDDING_DIM, BILSTM_HIDDEN_DIM,
     BILSTM_NUM_LAYERS, BILSTM_DROPOUT, BILSTM_DROPOUT_EMBED,
     BILSTM_BATCH_SIZE, BILSTM_EPOCHS, BILSTM_LR, BILSTM_LR_MIN,
@@ -339,7 +339,7 @@ def train(data_scale=None, params_override=None):
     )
 
     if data_scale:
-        scale_dir = Path(BILSTM_MODEL_PATH).parent / str(data_scale)
+        scale_dir = MODEL_BILSTM_DIR / str(data_scale)
         os.makedirs(scale_dir, exist_ok=True)
         model_path = str(scale_dir / "model.pt")
         metrics_path = str(scale_dir / "metrics.json")
