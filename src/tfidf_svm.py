@@ -48,9 +48,9 @@ def train(data_scale=None):
     tqdm.write(f"训练集: {len(train_df)} 条, 测试集: {len(test_df)} 条")
 
     X_train = train_df["text"].values
-    y_train = train_df["label"].values
+    y_train = train_df["label_name"].values
     X_test = test_df["text"].values
-    y_test = test_df["label"].values
+    y_test = test_df["label_name"].values
     pbar.update(1)
 
     # 2. 特征提取

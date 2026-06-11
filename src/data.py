@@ -278,7 +278,7 @@ def split_data(records):
 
 def build_df(records, stopwords: set):
     """从记录列表构建 DataFrame，对文本进行 jieba 分词 + 去停用词"""
-    texts, labels, label_names = zip(*records)
+    texts, label_names, labels = zip(*records)
     print(f"\njieba 分词 + 去停用词 ({len(texts)} 条)...")
 
     seg_texts = []

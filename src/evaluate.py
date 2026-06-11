@@ -23,6 +23,7 @@ import matplotlib
 matplotlib.use("Agg")  # 无头模式
 import matplotlib.pyplot as plt
 import seaborn as sns
+from tqdm import tqdm
 
 from config import (
     TRAIN_CSV, VALID_CSV, TEST_CSV,
@@ -34,12 +35,14 @@ from config import (
     BILSTM_MAX_LEN, BILSTM_EMBEDDING_DIM, BILSTM_HIDDEN_DIM,
     BILSTM_NUM_LAYERS, BILSTM_DROPOUT, BILSTM_DROPOUT_EMBED,
     BILSTM_VOCAB_SIZE, BILSTM_POOLING,
-    DEVICE, RANDOM_SEED, ensure_dirs,
+    BILSTM_BATCH_SIZE, BILSTM_EPOCHS,
+    BERT_MODEL_NAME, BERT_MAX_LEN, BERT_BATCH_SIZE, BERT_EPOCHS, BERT_LR,
+    DEVICE, RANDOM_SEED, ensure_dirs, EARLY_STOP_PATIENCE,
 )
 from utils import seed_everything, save_json, Timer
 
 # ── 全局字体 ──
-plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "SimHei", "DejaVu Sans"]
+plt.rcParams["font.sans-serif"] = ["Droid Sans Fallback", "Noto Sans CJK SC", "SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -47,14 +50,14 @@ plt.rcParams["axes.unicode_minus"] = False
 # 1. 加载标签映射
 # ══════════════════════════════════════════════════════
 
-def load_label_mapping() -> Tuple[List[str], Dict[int, str]]:
-    """加载类别映射，返回类别名称列表和 id->name 映射"""
+def load_label_mapping() -> Tuple[List[str], Dict[int, str], Dict[str, int]]:
+    """加载类别映射，返回类别名称列表、id->name 映射和 name->id 映射"""
     with open(LABEL_MAPPING_PATH, "r", encoding="utf-8") as f:
         mapping = json.load(f)
     # mapping: {"类别名": int_id}
     id_to_name = {int(v): k for k, v in mapping.items()}
     class_names = [id_to_name[i] for i in sorted(id_to_name.keys())]
-    return class_names, id_to_name
+    return class_names, id_to_name, mapping
 
 
 # ══════════════════════════════════════════════════════
@@ -170,38 +173,54 @@ def predict_with_model(model_name: str, texts: List[str]) -> np.ndarray:
         for w, _ in most_common:
             word2idx[w] = len(word2idx)
 
-        num_classes = pd.read_csv(TRAIN_CSV)["label"].nunique()
+        num_classes = pd.read_csv(TRAIN_CSV)["label_name"].nunique()
         model = load_bilstm(len(word2idx), num_classes)
 
+        # 使用 DataLoader 批量推理，与训练时的 evaluate() 一致
+        class _InferenceDataset(torch.utils.data.Dataset):
+            def __init__(self, texts, word2idx, max_len):
+                self.data = []
+                for text in texts:
+                    ids = [word2idx.get(w, 1) for w in text.split()]
+                    if len(ids) > max_len:
+                        ids = ids[:max_len]
+                    else:
+                        ids = ids + [0] * (max_len - len(ids))
+                    self.data.append(torch.tensor(ids, dtype=torch.long))
+            def __len__(self):
+                return len(self.data)
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        dataset = _InferenceDataset(texts, word2idx, BILSTM_MAX_LEN)
+        loader = torch.utils.data.DataLoader(
+            dataset, batch_size=BILSTM_BATCH_SIZE,
+        )
+
         preds = []
-        for text in texts:
-            ids = [word2idx.get(w, 1) for w in text.split()]
-            if len(ids) > BILSTM_MAX_LEN:
-                ids = ids[:BILSTM_MAX_LEN]
-            else:
-                ids = ids + [0] * (BILSTM_MAX_LEN - len(ids))
-            inp = torch.tensor([ids], dtype=torch.long).to(DEVICE)
-            with torch.no_grad():
-                logits = model(inp)
-                pred = torch.argmax(logits, dim=1).item()
-            preds.append(pred)
+        with torch.no_grad():
+            for inputs in tqdm(loader, desc="BiLSTM 推理", leave=False):
+                inputs = inputs.to(DEVICE)
+                logits = model(inputs)
+                preds.extend(torch.argmax(logits, dim=1).cpu().numpy().tolist())
         return np.array(preds)
 
     elif model_name == "bert":
-        num_classes = pd.read_csv(TRAIN_CSV)["label"].nunique()
+        num_classes = pd.read_csv(TRAIN_CSV)["label_name"].nunique()
         model, tokenizer = load_bert(num_classes)
+
         preds = []
-        for text in texts:
-            enc = tokenizer(
-                text, truncation=True, padding="max_length",
-                max_length=256, return_tensors="pt",
-            )
-            input_ids = enc["input_ids"].to(DEVICE)
-            attention_mask = enc["attention_mask"].to(DEVICE)
-            with torch.no_grad():
+        with torch.no_grad():
+            for i in tqdm(range(0, len(texts), BERT_BATCH_SIZE), desc="BERT 推理", leave=False):
+                batch_texts = texts[i:i + BERT_BATCH_SIZE]
+                enc = tokenizer(
+                    batch_texts, truncation=True, padding="max_length",
+                    max_length=BERT_MAX_LEN, return_tensors="pt",
+                )
+                input_ids = enc["input_ids"].to(DEVICE)
+                attention_mask = enc["attention_mask"].to(DEVICE)
                 outputs = model(input_ids, attention_mask=attention_mask)
-                pred = torch.argmax(outputs.logits, dim=1).item()
-            preds.append(pred)
+                preds.extend(torch.argmax(outputs.logits, dim=1).cpu().numpy().tolist())
         return np.array(preds)
 
     else:
@@ -413,23 +432,23 @@ def generate_report(
 
     lines.append("### 3.2 BiLSTM\n")
     lines.append("| 参数 | 值 |\n|------|------|\n")
-    lines.append("| Embedding Dim | 300 |\n")
-    lines.append("| Hidden Dim | 256 |\n")
-    lines.append("| LSTM Layers | 2 (双向) |\n")
-    lines.append("| Dropout | 0.5 |\n")
-    lines.append("| Max Length | 300 |\n")
-    lines.append("| Batch Size | 128 |\n")
-    lines.append("| Epochs | 10 (含 Early Stopping) |\n")
-    lines.append("| Optimizer | Adam |\n\n")
+    lines.append(f"| Embedding Dim | {BILSTM_EMBEDDING_DIM} |\n")
+    lines.append(f"| Hidden Dim | {BILSTM_HIDDEN_DIM} |\n")
+    lines.append(f"| LSTM Layers | {BILSTM_NUM_LAYERS} (双向) |\n")
+    lines.append(f"| Dropout | {BILSTM_DROPOUT} |\n")
+    lines.append(f"| Max Length | {BILSTM_MAX_LEN} |\n")
+    lines.append(f"| Batch Size | {BILSTM_BATCH_SIZE} |\n")
+    lines.append(f"| Epochs | {BILSTM_EPOCHS} (含 Early Stopping, patience={EARLY_STOP_PATIENCE}) |\n")
+    lines.append("| Optimizer | AdamW |\n\n")
 
     lines.append("### 3.3 BERT\n")
     lines.append("| 参数 | 值 |\n|------|------|\n")
-    lines.append(f"| 预训练模型 | {BERT_MODEL_PATH.parent.name} |\n")
-    lines.append("| Max Length | 256 |\n")
-    lines.append("| Batch Size | 16 |\n")
-    lines.append("| Epochs | 3 (含 Early Stopping) |\n")
+    lines.append(f"| 预训练模型 | {BERT_MODEL_NAME} |\n")
+    lines.append(f"| Max Length | {BERT_MAX_LEN} |\n")
+    lines.append(f"| Batch Size | {BERT_BATCH_SIZE} |\n")
+    lines.append(f"| Epochs | {BERT_EPOCHS} (含 Early Stopping, patience={EARLY_STOP_PATIENCE}) |\n")
     lines.append("| Optimizer | AdamW |\n")
-    lines.append("| Learning Rate | 2e-5 |\n\n")
+    lines.append(f"| Learning Rate | {BERT_LR} |\n\n")
 
     lines.append(f"训练设备: {DEVICE.upper()}\n\n")
 
@@ -537,13 +556,13 @@ def run():
     print("=" * 50)
 
     # 加载标签
-    class_names, id_to_name = load_label_mapping()
+    class_names, id_to_name, name_to_id = load_label_mapping()
     num_classes = len(class_names)
     test_df = pd.read_csv(TEST_CSV)
     train_df = pd.read_csv(TRAIN_CSV)
 
     X_test = test_df["text"].values
-    y_test = test_df["label"].values
+    y_test = test_df["label_name"].values  # 使用整数标签而非字符串名称
 
     print(f"测试集: {len(test_df)} 条, {num_classes} 个类别")
 
@@ -563,6 +582,12 @@ def run():
         print(f"评估模型: {name}")
         print(f"{'='*40}")
 
+        # SVM/BiLSTM 用分词后 text，BERT 用原始 raw_text（与训练一致）
+        if model_key == "bert":
+            model_texts = test_df.get("raw_text", test_df["text"]).values
+        else:
+            model_texts = test_df["text"].values
+
         # 检查模型文件是否存在
         model_paths = {
             "svm": SVM_MODEL_PATH,
@@ -574,8 +599,12 @@ def run():
             continue
 
         timer = Timer().tic()
-        y_pred = predict_with_model(model_key, X_test.tolist())
+        y_pred = predict_with_model(model_key, model_texts.tolist())
         infer_time = timer.toc(f"{name} 推理")
+
+        # 统一预测标签为整数（SVM 旧模型可能输出字符串名称）
+        if y_pred.dtype.kind in ('U', 'S', 'O'):
+            y_pred = np.array([name_to_id[p] for p in y_pred])
 
         y_preds[name] = {"true": y_test, "pred": y_pred}
 
