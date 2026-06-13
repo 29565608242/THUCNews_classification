@@ -573,8 +573,14 @@ def plot_category_f1(scale_metrics, save_path):
     print(f"  类别 F1 -> {save_path}")
 
 
-def plot_data_scale_curve(all_results, save_path):
-    """绘制数据量 vs F1 曲线"""
+def plot_data_scale_curve(all_results, save_path, exclude_models=None):
+    """绘制数据量 vs F1 曲线
+
+    Args:
+        all_results: {scale: [metrics, ...]}
+        save_path: 图片保存路径
+        exclude_models: 要排除的模型名列表，如 ["BERT"]
+    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -582,6 +588,7 @@ def plot_data_scale_curve(all_results, save_path):
 
     _setup_chinese_font()
 
+    exclude_models = set(exclude_models or [])
     colors = {"TF-IDF+SVM": "#3498db", "BiLSTM": "#2ecc71", "BERT": "#e74c3c"}
     markers = {"TF-IDF+SVM": "o", "BiLSTM": "s", "BERT": "^"}
 
@@ -592,6 +599,8 @@ def plot_data_scale_curve(all_results, save_path):
     for scale_key, metrics_list in all_results.items():
         for m in metrics_list:
             name = m["model"]
+            if name in exclude_models:
+                continue
             if name not in model_data:
                 model_data[name] = {"scales": [], "macro_f1": [], "accuracy": []}
             # scale_key 是 "full" 或数字字符串
@@ -1016,20 +1025,20 @@ def main(filter_scale=None, filter_model=None):
         # 生成对比报告
         generate_scale_report(scale_key, metrics_list, output_dir)
 
-        # 混淆矩阵（每个模型独立）
-        if len(metrics_list) > 1:
-            preds_data = all_predictions.get(scale_key, {})
-            for model_name, (y_pred_m, y_true_m) in preds_data.items():
-                try:
-                    model_slug = model_name.lower().replace("+", "_").replace("-", "_")
-                    plot_confusion_matrix(
-                        y_true_m, y_pred_m,
-                        output_dir / f"confusion_matrix_{model_slug}.png",
-                    )
-                except Exception as e:
-                    print(f"  {model_name} 混淆矩阵绘制跳过: {e}")
+        # 混淆矩阵
+        preds_data = all_predictions.get(scale_key, {})
+        for model_name, (y_pred_m, y_true_m) in preds_data.items():
+            try:
+                model_slug = model_name.lower().replace("+", "_").replace("-", "_")
+                plot_confusion_matrix(
+                    y_true_m, y_pred_m,
+                    output_dir / f"confusion_matrix_{model_slug}.png",
+                )
+            except Exception as e:
+                print(f"  {model_name} 混淆矩阵绘制跳过: {e}")
 
-            # 类别 F1 对比图
+        # 类别 F1 对比图（仅多模型时绘制）
+        if len(metrics_list) > 1:
             model_metrics_dict = {m["model"]: m for m in metrics_list}
             try:
                 plot_category_f1(model_metrics_dict, output_dir / "category_f1.png")
@@ -1047,10 +1056,10 @@ def main(filter_scale=None, filter_model=None):
             except Exception as e:
                 print(f"  数据量分析跳过 ({display_name}): {e}")
 
-    # 7. 全局数据量 vs F1 曲线
+    # 7. 全局数据量 vs F1 曲线（排除 BERT，只对比 SVM 和 BiLSTM 的数据量表现）
     if len(results) >= 2:
         try:
-            plot_data_scale_curve(results, RESULT_DIR / "data_scale_vs_f1.png")
+            plot_data_scale_curve(results, RESULT_DIR / "data_scale_vs_f1.png", exclude_models=["BERT"])
         except Exception as e:
             print(f"  数据量曲线绘制跳过: {e}")
 

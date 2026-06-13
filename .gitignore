@@ -4,4 +4,6 @@ results/
 __pycache__/
 *.pyc
 *.pyo
+.vscode/
+
 
